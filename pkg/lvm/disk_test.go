@@ -710,12 +710,19 @@ func TestLookupDeviceNumbers(t *testing.T) {
 	if _, _, found, err := lookupDeviceNumbers(filepath.Join(t.TempDir(), "missing")); err != nil || found {
 		t.Fatalf("missing path: found=%v err=%v, want not found without error", found, err)
 	}
+	// Whatever is not a block device resolves as a volume group name.
+	// /dev/<vg> is a directory while the volume group has an active LV, so
+	// a disk registered as /dev/<vg> must survive its first replica
+	// activating.
+	if _, _, found, err := lookupDeviceNumbers(t.TempDir()); err != nil || found {
+		t.Fatalf("directory: found=%v err=%v, want not found without error", found, err)
+	}
 	regular := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(regular, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := lookupDeviceNumbers(regular); err == nil {
-		t.Fatal("a regular file must be rejected as a device")
+	if _, _, found, err := lookupDeviceNumbers(regular); err != nil || found {
+		t.Fatalf("regular file: found=%v err=%v, want not found without error", found, err)
 	}
 }
 

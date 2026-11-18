@@ -78,8 +78,11 @@ func NewDisk() Disk {
 }
 
 // deviceNumbersFunc reports the major and minor numbers of the block device a
-// path names, following symlinks. found is false when nothing exists at the
-// path; a path that exists but is not a block device is an error.
+// path names, following symlinks. found is false whenever the path does not
+// name a block device: nothing there, or a directory or other non-device file
+// (an active volume group's /dev/<vg> is a directory of LV links). The
+// element is then resolved as a volume group name, and the operations reject
+// names no volume group answers to.
 type deviceNumbersFunc func(devPath string) (major, minor int64, found bool, err error)
 
 func lookupDeviceNumbers(devPath string) (int64, int64, bool, error) {
@@ -91,7 +94,7 @@ func lookupDeviceNumbers(devPath string) (int64, int64, bool, error) {
 		return 0, 0, false, fmt.Errorf("failed to stat device %v: %w", devPath, err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFBLK {
-		return 0, 0, false, fmt.Errorf("device path %v is not a block device", devPath)
+		return 0, 0, false, nil
 	}
 	return int64(unix.Major(uint64(stat.Rdev))), int64(unix.Minor(uint64(stat.Rdev))), true, nil
 }
