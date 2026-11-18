@@ -332,18 +332,19 @@ func (ops Disk) parseDiskPath(path string) (*diskPath, error) {
 
 // lvmVG is the vgs report of one volume group.
 type lvmVG struct {
-	Name       string
-	UUID       string
-	Tags       []string
-	LVCount    int
-	Size       int64
-	Free       int64
-	ExtentSize int64
+	Name           string
+	UUID           string
+	Tags           []string
+	LVCount        int
+	Size           int64
+	Free           int64
+	ExtentSize     int64
+	MissingPVCount int
 }
 
 // lvmVGFields is the vgs report queryVGs parses; parseVolumeGroup follows its
 // order.
-const lvmVGFields = "vg_name,vg_uuid,vg_tags,lv_count,vg_size,vg_free,vg_extent_size"
+const lvmVGFields = "vg_name,vg_uuid,vg_tags,lv_count,vg_size,vg_free,vg_extent_size,vg_missing_pv_count"
 
 // managedByLonghorn reports whether the local data engine owns the volume
 // group, which it marks with a tag.
@@ -390,7 +391,7 @@ func queryVGs(executor lhexec.ExecuteInterface, selection string) ([]lvmVG, erro
 
 func parseVolumeGroup(output string) (*lvmVG, error) {
 	fields := strings.Split(strings.TrimSpace(output), ";")
-	if len(fields) != 7 {
+	if len(fields) != 8 {
 		return nil, fmt.Errorf("unexpected volume-group output: %v", output)
 	}
 	for i := range fields {
@@ -409,6 +410,9 @@ func parseVolumeGroup(output string) (*lvmVG, error) {
 	}
 	if vg.ExtentSize, err = strconv.ParseInt(fields[6], 10, 64); err != nil || vg.ExtentSize <= 0 {
 		return nil, fmt.Errorf("failed to parse the extent size of volume group %v: %v", vg.Name, fields[6])
+	}
+	if vg.MissingPVCount, err = strconv.Atoi(fields[7]); err != nil {
+		return nil, fmt.Errorf("failed to parse the missing physical volume count of volume group %v: %w", vg.Name, err)
 	}
 	return vg, nil
 }
@@ -846,7 +850,31 @@ func (ops Disk) Get(req *rpc.DiskGetRequest) (*rpc.Disk, error) {
 	if vg == nil || !vg.managedByLonghorn() {
 		return nil, grpcstatus.Errorf(grpccodes.NotFound, "cannot find a managed volume group for %v", req.DiskPath)
 	}
+	if vg, err = ops.reimportMissingDevices(vg); err != nil {
+		return nil, grpcstatus.Error(grpccodes.Internal, err.Error())
+	}
 	return ops.getDiskInfo(vg, req.DiskName, req.DiskPath)
+}
+
+// reimportMissingDevices refreshes the devices file of a managed volume group
+// whose metadata names physical volumes the devices file does not hold: an
+// administrator grew the group on the host with vgextend, which records the
+// new physical volume in the group but not in Longhorn's devices file. Every
+// command that changes LVM metadata fails while a physical volume is missing,
+// so the group's devices are imported again on the disk refresh that notices
+// the gap.
+func (ops Disk) reimportMissingDevices(vg *lvmVG) (*lvmVG, error) {
+	if vg.MissingPVCount == 0 {
+		return vg, nil
+	}
+	if _, err := ops.executor.Execute(nil, "vgimportdevices", CommandArgs(vg.Name), lhtypes.ExecuteDefaultTimeout); err != nil {
+		return nil, fmt.Errorf("volume group %v misses %v physical volumes and re-importing its devices failed: %w", vg.Name, vg.MissingPVCount, err)
+	}
+	logrus.WithFields(logrus.Fields{
+		"vgName":         vg.Name,
+		"missingPVCount": vg.MissingPVCount,
+	}).Info("Re-imported the devices of a volume group with missing physical volumes")
+	return requireVG(ops.executor, vg.Name)
 }
 
 // Metrics reports the I/O of the disk's volume group as the sum over its

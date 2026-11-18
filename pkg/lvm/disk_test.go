@@ -192,9 +192,15 @@ func lvmPVLine(path, vgName string) string {
 }
 
 // lvmVGLine renders one vgs report line: a 100 GiB volume group with half of
-// it free and 4 MiB extents.
+// it free, 4 MiB extents and no missing physical volumes.
 func lvmVGLine(name, vgUUID string, tags string, lvCount int) string {
-	return fmt.Sprintf("  %s;%s;%s;%d;107374182400;53687091200;4194304\n", name, vgUUID, tags, lvCount)
+	return lvmVGLineMissingPVs(name, vgUUID, tags, lvCount, 0)
+}
+
+// lvmVGLineMissingPVs is lvmVGLine with physical volumes the devices file
+// does not hold.
+func lvmVGLineMissingPVs(name, vgUUID string, tags string, lvCount, missingPVs int) string {
+	return fmt.Sprintf("  %s;%s;%s;%d;107374182400;53687091200;4194304;%d\n", name, vgUUID, tags, lvCount, missingPVs)
 }
 
 func TestParseDiskPath(t *testing.T) {
@@ -269,6 +275,54 @@ func TestLVMDiskGetByVolumeGroupName(t *testing.T) {
 	}
 	if slicesContainPrefix(executor.calls, "pvs") {
 		t.Fatalf("a volume group name needs no physical volume lookup: %v", executor.calls)
+	}
+	if slicesContainPrefix(executor.calls, "vgimportdevices") {
+		t.Fatalf("a volume group without missing physical volumes needs no device re-import: %v", executor.calls)
+	}
+}
+
+func TestLVMDiskGetReimportsMissingDevices(t *testing.T) {
+	// An administrator grew the volume group on the host with vgextend, whose
+	// run did not use Longhorn's devices file, so the group's metadata names
+	// a physical volume the devices file does not hold and every
+	// metadata-changing command fails. The refresh imports the group's
+	// devices again and reports it healthy.
+	executor := &fakeExecutor{
+		outputSequences: map[string][]string{
+			lvmVGListPrefix("data-vg"): {
+				lvmVGLineMissingPVs("data-vg", "VG-9", VGTag, 2, 1),
+				lvmVGLine("data-vg", "VG-9", VGTag, 2),
+			},
+		},
+	}
+	ops := testDisk(executor)
+
+	diskInfo, err := ops.Get(&rpc.DiskGetRequest{DiskName: "disk-1", DiskPath: "data-vg"})
+	if err != nil {
+		t.Fatalf("DiskGet failed: %v", err)
+	}
+	if !slicesContainPrefix(executor.calls, lvmCommandPrefix("vgimportdevices", "data-vg")) {
+		t.Fatalf("missing physical volumes must re-import the volume group's devices: %v", executor.calls)
+	}
+	if diskInfo.Uuid != "VG-9" {
+		t.Fatalf("unexpected disk info: %+v", diskInfo)
+	}
+}
+
+func TestLVMDiskGetReportsFailedReimport(t *testing.T) {
+	executor := &fakeExecutor{
+		outputs: map[string]string{
+			lvmVGListPrefix("data-vg"): lvmVGLineMissingPVs("data-vg", "VG-9", VGTag, 2, 1),
+		},
+		errs: map[string]error{
+			"vgimportdevices": fmt.Errorf("device not found"),
+		},
+	}
+	ops := testDisk(executor)
+
+	_, err := ops.Get(&rpc.DiskGetRequest{DiskName: "disk-1", DiskPath: "data-vg"})
+	if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "re-importing its devices failed") {
+		t.Fatalf("DiskGet error = %v, want an internal error naming the failed re-import", err)
 	}
 }
 
