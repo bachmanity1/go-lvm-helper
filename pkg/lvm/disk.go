@@ -1,13 +1,14 @@
 package lvm
 
 import (
-	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/cockroachdb/errors"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -16,9 +17,10 @@ import (
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
+	"github.com/longhorn/types/pkg/generated/enginerpc"
+
 	lhexec "github.com/longhorn/go-common-libs/exec"
 	lhtypes "github.com/longhorn/go-common-libs/types"
-	"github.com/longhorn/types/pkg/generated/enginerpc"
 	rpc "github.com/longhorn/types/pkg/generated/imrpc"
 )
 
@@ -95,7 +97,7 @@ func lookupDeviceNumbers(devPath string) (int64, int64, bool, error) {
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
 			return 0, 0, false, nil
 		}
-		return 0, 0, false, fmt.Errorf("failed to stat device %v: %w", devPath, err)
+		return 0, 0, false, errors.Wrapf(err, "failed to stat device %v", devPath)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFBLK {
 		return 0, 0, false, nil
@@ -119,19 +121,17 @@ func InitializeDevicesFile() error {
 }
 
 func createDevicesFileIfMissing(path string) (bool, error) {
-	created := true
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if os.IsExist(err) {
-		created = false
-		file, err = os.OpenFile(path, os.O_WRONLY, 0600)
+		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to create or open LVM devices file %v: %w", path, err)
+		return false, errors.Wrapf(err, "failed to create LVM devices file %v", path)
 	}
 	if err := file.Close(); err != nil {
-		return false, fmt.Errorf("failed to close LVM devices file %v: %w", path, err)
+		return false, errors.Wrapf(err, "failed to close LVM devices file %v", path)
 	}
-	return created, nil
+	return true, nil
 }
 
 // CommandArgs limits an LVM command to Longhorn's persistent devices file,
@@ -153,7 +153,7 @@ func VGNameForDiskUUID(executor lhexec.ExecuteInterface, diskUUID string) (strin
 		return "", err
 	}
 	if vg == nil {
-		return "", fmt.Errorf("cannot find volume group %v", diskUUID)
+		return "", errors.Errorf("cannot find volume group %v", diskUUID)
 	}
 	return vg.Name, nil
 }
@@ -161,6 +161,9 @@ func VGNameForDiskUUID(executor lhexec.ExecuteInterface, diskUUID string) (strin
 // getVGByUUID returns the volume group with that UUID, or nil when none is
 // visible through the devices file.
 func getVGByUUID(executor lhexec.ExecuteInterface, vgUUID string) (*lvmVG, error) {
+	if !isValidLVMUUID(vgUUID) {
+		return nil, errors.Errorf("invalid volume group UUID %q", vgUUID)
+	}
 	vgs, err := queryVGs(executor, "vg_uuid="+vgUUID)
 	if err != nil {
 		return nil, err
@@ -171,7 +174,7 @@ func getVGByUUID(executor lhexec.ExecuteInterface, vgUUID string) (*lvmVG, error
 	case 1:
 		return &vgs[0], nil
 	default:
-		return nil, fmt.Errorf("volume group UUID %v matched several volume groups", vgUUID)
+		return nil, errors.Errorf("volume group UUID %v matched several volume groups", vgUUID)
 	}
 }
 
@@ -188,7 +191,7 @@ func GetOrCreateThinPool(executor lhexec.ExecuteInterface, vgName string) (*Logi
 			return pool, growThinPool(executor, pool)
 		}
 		if err := RemoveThinPoolIfUnused(executor, vgName); err != nil {
-			return nil, fmt.Errorf("%v; failed to remove the empty thin pool: %w", validationErr, err)
+			return nil, errors.Wrapf(err, "%v; failed to remove the empty thin pool", validationErr)
 		}
 		pool, err = GetLogicalVolume(executor, vgName, ThinPoolName)
 		if err != nil {
@@ -205,13 +208,13 @@ func GetOrCreateThinPool(executor lhexec.ExecuteInterface, vgName string) (*Logi
 	}
 	poolDataSize := ((vg.Free - ThinPoolReserveBytes) / vg.ExtentSize) * vg.ExtentSize
 	if poolDataSize <= 0 {
-		return nil, fmt.Errorf("volume group %v has %v bytes free, not enough to retain the %v-byte thin-pool reserve", vgName, vg.Free, ThinPoolReserveBytes)
+		return nil, errors.Errorf("volume group %v has %v bytes free, not enough to retain the %v-byte thin-pool reserve", vgName, vg.Free, ThinPoolReserveBytes)
 	}
 
 	if _, err := executor.Execute(nil, "lvcreate", CommandArgs(
 		"-y", "--type", "thin-pool", "-n", ThinPoolName,
 		"-L", fmt.Sprintf("%vb", poolDataSize), "--zero", "y", vgName), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return nil, fmt.Errorf("failed to create thin pool %v/%v: %w", vgName, ThinPoolName, err)
+		return nil, errors.Wrapf(err, "failed to create thin pool %v/%v", vgName, ThinPoolName)
 	}
 
 	pool, err = GetLogicalVolume(executor, vgName, ThinPoolName)
@@ -219,7 +222,7 @@ func GetOrCreateThinPool(executor lhexec.ExecuteInterface, vgName string) (*Logi
 		return nil, err
 	}
 	if pool == nil {
-		return nil, fmt.Errorf("thin pool %v/%v is absent after creation", vgName, ThinPoolName)
+		return nil, errors.Errorf("thin pool %v/%v is absent after creation", vgName, ThinPoolName)
 	}
 	if err := validateThinPool(pool); err != nil {
 		return nil, err
@@ -252,10 +255,10 @@ func RemoveThinPoolIfUnused(executor lhexec.ExecuteInterface, vgName string) err
 		return nil
 	}
 	if !pool.IsThinPool() {
-		return fmt.Errorf("refusing to remove unmanaged logical volume %v/%v", vgName, ThinPoolName)
+		return errors.Errorf("refusing to remove unmanaged logical volume %v/%v", vgName, ThinPoolName)
 	}
 	if _, err := executor.Execute(nil, "lvremove", CommandArgs("-y", vgName+"/"+ThinPoolName), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return fmt.Errorf("failed to remove empty thin pool %v/%v: %w", vgName, ThinPoolName, err)
+		return errors.Wrapf(err, "failed to remove empty thin pool %v/%v", vgName, ThinPoolName)
 	}
 	logrus.WithField("vgName", vgName).Info("Deleted empty local data engine thin pool")
 	return nil
@@ -263,11 +266,11 @@ func RemoveThinPoolIfUnused(executor lhexec.ExecuteInterface, vgName string) err
 
 func validateThinPool(pool *LogicalVolume) error {
 	if !pool.IsThinPool() {
-		return fmt.Errorf("logical volume %v/%v is not the expected thin pool", pool.VGName, pool.Name)
+		return errors.Errorf("logical volume %v/%v is not the expected thin pool", pool.VGName, pool.Name)
 	}
 	zeroed := len(pool.Attr) > 7 && pool.Attr[7] == 'z'
 	if !zeroed {
-		return fmt.Errorf("thin pool %v/%v has zeroing disabled", pool.VGName, pool.Name)
+		return errors.Errorf("thin pool %v/%v has zeroing disabled", pool.VGName, pool.Name)
 	}
 	return nil
 }
@@ -320,15 +323,18 @@ func (ops Disk) parseDiskPath(path string) (*diskPath, error) {
 			return nil, err
 		}
 		if found {
+			if !filepath.IsAbs(element) {
+				return nil, errors.Errorf("device path %v in disk path %v must be an absolute path", element, path)
+			}
 			dp.devices = append(dp.devices, diskDevice{path: element, major: major, minor: minor})
 			continue
 		}
 		if len(elements) > 1 {
-			return nil, fmt.Errorf("%v in disk path %v is not a block device; a multi-device path lists block devices only", element, path)
+			return nil, errors.Errorf("%v in disk path %v is not a block device; a multi-device path lists block devices only", element, path)
 		}
 		name := strings.TrimPrefix(element, "/dev/")
-		if name == "" || strings.ContainsAny(name, "/ \t") {
-			return nil, fmt.Errorf("disk path %v is neither a block device nor a volume group name", path)
+		if !isValidLVMName(name) {
+			return nil, errors.Errorf("disk path %v is neither a block device nor a volume group name", path)
 		}
 		dp.vgName = name
 	}
@@ -378,7 +384,7 @@ func queryVGs(executor lhexec.ExecuteInterface, selection string) ([]lvmVG, erro
 	args = append(args, "-o", lvmVGFields)
 	output, err := executor.Execute(nil, "vgs", CommandArgs(args...), lhtypes.ExecuteDefaultTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list volume groups: %w", err)
+		return nil, errors.Wrapf(err, "failed to list volume groups")
 	}
 	vgs := []lvmVG{}
 	for _, line := range strings.Split(output, "\n") {
@@ -397,7 +403,7 @@ func queryVGs(executor lhexec.ExecuteInterface, selection string) ([]lvmVG, erro
 func parseVolumeGroup(output string) (*lvmVG, error) {
 	fields := strings.Split(strings.TrimSpace(output), ";")
 	if len(fields) != 8 {
-		return nil, fmt.Errorf("unexpected volume-group output: %v", output)
+		return nil, errors.Errorf("unexpected volume-group output: %v", output)
 	}
 	for i := range fields {
 		fields[i] = strings.TrimSpace(fields[i])
@@ -405,19 +411,19 @@ func parseVolumeGroup(output string) (*lvmVG, error) {
 	vg := &lvmVG{Name: fields[0], UUID: fields[1], Tags: parseLVMTags(fields[2])}
 	var err error
 	if vg.LVCount, err = strconv.Atoi(fields[3]); err != nil {
-		return nil, fmt.Errorf("failed to parse the logical volume count of volume group %v: %w", vg.Name, err)
+		return nil, errors.Wrapf(err, "failed to parse the logical volume count of volume group %v", vg.Name)
 	}
 	if vg.Size, err = strconv.ParseInt(fields[4], 10, 64); err != nil {
-		return nil, fmt.Errorf("failed to parse the size of volume group %v: %w", vg.Name, err)
+		return nil, errors.Wrapf(err, "failed to parse the size of volume group %v", vg.Name)
 	}
 	if vg.Free, err = strconv.ParseInt(fields[5], 10, 64); err != nil {
-		return nil, fmt.Errorf("failed to parse the free size of volume group %v: %w", vg.Name, err)
+		return nil, errors.Wrapf(err, "failed to parse the free size of volume group %v", vg.Name)
 	}
 	if vg.ExtentSize, err = strconv.ParseInt(fields[6], 10, 64); err != nil || vg.ExtentSize <= 0 {
-		return nil, fmt.Errorf("failed to parse the extent size of volume group %v: %v", vg.Name, fields[6])
+		return nil, errors.Errorf("failed to parse the extent size of volume group %v: %v", vg.Name, fields[6])
 	}
 	if vg.MissingPVCount, err = strconv.Atoi(fields[7]); err != nil {
-		return nil, fmt.Errorf("failed to parse the missing physical volume count of volume group %v: %w", vg.Name, err)
+		return nil, errors.Wrapf(err, "failed to parse the missing physical volume count of volume group %v", vg.Name)
 	}
 	return vg, nil
 }
@@ -443,7 +449,7 @@ func requireVG(executor lhexec.ExecuteInterface, name string) (*lvmVG, error) {
 		return nil, err
 	}
 	if vg == nil {
-		return nil, fmt.Errorf("cannot find volume group %v", name)
+		return nil, errors.Errorf("cannot find volume group %v", name)
 	}
 	return vg, nil
 }
@@ -502,7 +508,7 @@ func commonVGName(pvs []lvmPV, devices []diskDevice) (string, error) {
 			continue
 		}
 		if vgName != "" && vgName != pv.VGName {
-			return "", fmt.Errorf("devices %v belong to different volume groups %v and %v", joinDevicePaths(devices), vgName, pv.VGName)
+			return "", errors.Errorf("devices %v belong to different volume groups %v and %v", joinDevicePaths(devices), vgName, pv.VGName)
 		}
 		vgName = pv.VGName
 	}
@@ -672,28 +678,15 @@ func (ops Disk) createVolumeGroup(devices []diskDevice) (vg *lvmVG, existed bool
 // volumes, importing its devices into the devices file and tagging it. A
 // volume group Longhorn already manages is returned as it is.
 func (ops Disk) adoptVolumeGroup(name string) (vg *lvmVG, existed bool, err error) {
+	if !isValidLVMName(name) {
+		return nil, false, grpcstatus.Errorf(grpccodes.InvalidArgument, "disk path %v is neither a block device nor a volume group", name)
+	}
 	vg, err = getVG(ops.executor, name)
 	if err != nil {
 		return nil, false, grpcstatus.Error(grpccodes.Internal, err.Error())
 	}
-	imported := false
-	if vg == nil {
-		if _, err := ops.executor.Execute(nil, "vgimportdevices", CommandArgs(name), lhtypes.ExecuteDefaultTimeout); err != nil {
-			return nil, false, grpcstatus.Errorf(grpccodes.InvalidArgument, "disk path %v is neither a block device nor a volume group: %v", name, err)
-		}
-		imported = true
-		vg, err = getVG(ops.executor, name)
-		if err != nil {
-			return nil, false, grpcstatus.Error(grpccodes.Internal, err.Error())
-		}
-		if vg == nil {
-			return nil, false, grpcstatus.Errorf(grpccodes.InvalidArgument, "disk path %v is neither a block device nor a volume group", name)
-		}
-	}
-	if vg.managedByLonghorn() {
-		return vg, true, nil
-	}
 
+	imported := false
 	undoImport := func() {
 		if !imported {
 			return
@@ -710,8 +703,27 @@ func (ops Disk) adoptVolumeGroup(name string) (vg *lvmVG, existed bool, err erro
 		ops.forgetDevices(paths)
 	}
 
+	if vg == nil {
+		if _, err := ops.executor.Execute(nil, "vgimportdevices", CommandArgs(name), lhtypes.ExecuteDefaultTimeout); err != nil {
+			return nil, false, grpcstatus.Errorf(grpccodes.InvalidArgument, "disk path %v is neither a block device nor a volume group: %v", name, err)
+		}
+		imported = true
+		vg, err = getVG(ops.executor, name)
+		if err != nil {
+			undoImport()
+			return nil, false, grpcstatus.Error(grpccodes.Internal, err.Error())
+		}
+		if vg == nil {
+			undoImport()
+			return nil, false, grpcstatus.Errorf(grpccodes.InvalidArgument, "disk path %v is neither a block device nor a volume group", name)
+		}
+	}
+	if vg.managedByLonghorn() {
+		return vg, true, nil
+	}
+
 	if vg.LVCount > 0 {
-		lvs, err := queryLogicalVolumes(ops.executor, "vg_name="+name)
+		lvs, err := listVGLogicalVolumes(ops.executor, name)
 		names := make([]string, 0, len(lvs))
 		if err == nil {
 			for _, lv := range lvs {
@@ -824,6 +836,9 @@ func (ops Disk) resolveDiskForDeletion(req *rpc.DiskDeleteRequest) (*lvmVG, *dis
 		}
 		return vg, dp, nil
 	}
+	if !isValidLVMUUID(req.DiskUuid) {
+		return nil, nil, grpcstatus.Errorf(grpccodes.InvalidArgument, "invalid disk UUID %q", req.DiskUuid)
+	}
 	vg, err := getVGByUUID(ops.executor, req.DiskUuid)
 	if err != nil {
 		return nil, nil, grpcstatus.Error(grpccodes.Internal, err.Error())
@@ -873,7 +888,7 @@ func (ops Disk) reimportMissingDevices(vg *lvmVG) (*lvmVG, error) {
 		return vg, nil
 	}
 	if _, err := ops.executor.Execute(nil, "vgimportdevices", CommandArgs(vg.Name), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return nil, fmt.Errorf("volume group %v misses %v physical volumes and re-importing its devices failed: %w", vg.Name, vg.MissingPVCount, err)
+		return nil, errors.Wrapf(err, "volume group %v misses %v physical volumes and re-importing its devices failed", vg.Name, vg.MissingPVCount)
 	}
 	logrus.WithFields(logrus.Fields{
 		"vgName":         vg.Name,
@@ -893,8 +908,8 @@ func (ops Disk) Metrics(req *rpc.DiskGetRequest) (*rpc.DiskMetricsGetReply, erro
 	if err != nil {
 		return nil, grpcstatus.Error(grpccodes.Internal, err.Error())
 	}
-	if vg == nil {
-		return nil, grpcstatus.Errorf(grpccodes.NotFound, "cannot find a volume group for %v", req.DiskPath)
+	if vg == nil || !vg.managedByLonghorn() {
+		return nil, grpcstatus.Errorf(grpccodes.NotFound, "cannot find a managed volume group for %v", req.DiskPath)
 	}
 	total := &enginerpc.Metrics{}
 	var readLatency, writeLatency latencyAverage
@@ -955,15 +970,15 @@ func (ops Disk) verifyDeviceEmpty(devPath string) error {
 	if _, _, found, err := ops.deviceNumbers(devPath); err != nil {
 		return err
 	} else if !found {
-		return fmt.Errorf("device %v does not exist", devPath)
+		return errors.Errorf("device %v does not exist", devPath)
 	}
 
 	output, err := ops.executor.Execute(nil, "wipefs", []string{"--noheadings", "--parsable", devPath}, lhtypes.ExecuteDefaultTimeout)
 	if err != nil {
-		return fmt.Errorf("failed to check signatures on device %v: %v", devPath, err)
+		return errors.Errorf("failed to check signatures on device %v: %v", devPath, err)
 	}
 	if strings.TrimSpace(output) != "" {
-		return fmt.Errorf("device %v has an existing filesystem or partition table", devPath)
+		return errors.Errorf("device %v has an existing filesystem or partition table", devPath)
 	}
 	return nil
 }
@@ -996,7 +1011,7 @@ func findPV(pvs []lvmPV, device diskDevice) *lvmPV {
 func parsePhysicalVolume(output string) (*lvmPV, error) {
 	fields := strings.Split(strings.TrimSpace(output), ";")
 	if len(fields) != 4 {
-		return nil, fmt.Errorf("unexpected physical-volume output: %v", output)
+		return nil, errors.Errorf("unexpected physical-volume output: %v", output)
 	}
 	return &lvmPV{
 		Path:   strings.TrimSpace(fields[0]),
@@ -1043,9 +1058,12 @@ func (ops Disk) queryPhysicalVolumes(selection string) ([]lvmPV, error) {
 }
 
 func (ops Disk) listVGPhysicalVolumes(vgName string) ([]lvmPV, error) {
+	if !isValidLVMName(vgName) {
+		return nil, errors.Errorf("invalid volume group name %q", vgName)
+	}
 	pvs, err := ops.queryPhysicalVolumes("vg_name=" + vgName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list physical volumes in volume group %v: %w", vgName, err)
+		return nil, errors.Wrapf(err, "failed to list physical volumes in volume group %v", vgName)
 	}
 	return pvs, nil
 }
@@ -1064,7 +1082,7 @@ func growThinPool(executor lhexec.ExecuteInterface, pool *LogicalVolume) error {
 	}
 	if _, err := executor.Execute(nil, "lvextend", CommandArgs(
 		"-y", "-L", fmt.Sprintf("+%vb", extendSize), pool.VGName+"/"+pool.Name), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return fmt.Errorf("failed to extend thin pool %v/%v by %v bytes: %w", pool.VGName, pool.Name, extendSize, err)
+		return errors.Wrapf(err, "failed to extend thin pool %v/%v by %v bytes", pool.VGName, pool.Name, extendSize)
 	}
 	pool.Size += extendSize
 	logrus.WithFields(logrus.Fields{
@@ -1118,7 +1136,7 @@ func (ops Disk) addDevice(devicePath string) (added bool, err error) {
 		if strings.Contains(strings.ToLower(err.Error()), "already") {
 			return false, nil
 		}
-		return false, fmt.Errorf("failed to add device %v to LVM devices file %v: %v", devicePath, DevicesFileName, err)
+		return false, errors.Errorf("failed to add device %v to LVM devices file %v: %v", devicePath, DevicesFileName, err)
 	}
 	logrus.WithFields(logrus.Fields{
 		"devicePath":  devicePath,
@@ -1129,7 +1147,7 @@ func (ops Disk) addDevice(devicePath string) (added bool, err error) {
 
 func (ops Disk) removeDevice(devicePath string) error {
 	if _, err := ops.executor.Execute(nil, "lvmdevices", CommandArgs("--deldev", devicePath), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return fmt.Errorf("failed to remove device %v from LVM devices file %v: %v", devicePath, DevicesFileName, err)
+		return errors.Errorf("failed to remove device %v from LVM devices file %v: %v", devicePath, DevicesFileName, err)
 	}
 	logrus.WithFields(logrus.Fields{
 		"devicePath":  devicePath,

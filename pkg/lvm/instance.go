@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cockroachdb/errors"
 	"github.com/sirupsen/logrus"
 
 	grpccodes "google.golang.org/grpc/codes"
@@ -88,6 +89,9 @@ func (ops Instance) Create(req *rpc.InstanceCreateRequest) (*rpc.InstanceRespons
 }
 
 func (ops Instance) replicaCreate(name, diskUUID string, size int64, mode string) (*rpc.InstanceResponse, error) {
+	if name == ThinPoolName {
+		return nil, grpcstatus.Errorf(grpccodes.InvalidArgument, "replica name %q is reserved for the local data engine thin pool", name)
+	}
 	if !IsProvisioningMode(mode) {
 		return nil, grpcstatus.Errorf(grpccodes.InvalidArgument, "invalid local provisioning mode %q", mode)
 	}
@@ -421,7 +425,7 @@ func activateLogicalVolume(executor lhexec.ExecuteInterface, vgName, lvName stri
 	if _, err := executor.Execute(nil, "lvchange", CommandArgs("-ay", vgName+"/"+lvName), lhtypes.ExecuteDefaultTimeout); err != nil {
 		lv, inspectErr := GetLogicalVolume(executor, vgName, lvName)
 		if inspectErr != nil || lv == nil || !lv.Active {
-			return fmt.Errorf("failed to activate logical volume %v/%v: %v", vgName, lvName, err)
+			return errors.Errorf("failed to activate logical volume %v/%v: %v", vgName, lvName, err)
 		}
 	}
 	return nil
@@ -465,7 +469,7 @@ func ActivateAttachedLogicalVolumes(executor lhexec.ExecuteInterface) error {
 		log.Info("Reactivated the local replica of an attached engine")
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("failed to reactivate %d attached local replica(s): %v", len(failures), strings.Join(failures, "; "))
+		return errors.Errorf("failed to reactivate %d attached local replica(s): %v", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
 }
@@ -476,13 +480,13 @@ func (ops Instance) confirmLV(vgName, lvName string, active bool, minimumSize in
 		return nil, err
 	}
 	if lv == nil {
-		return nil, fmt.Errorf("logical volume %v/%v does not exist after the LVM operation completed", vgName, lvName)
+		return nil, errors.Errorf("logical volume %v/%v does not exist after the LVM operation completed", vgName, lvName)
 	}
 	if lv.Active != active {
-		return nil, fmt.Errorf("logical volume %v/%v active state is %v, expected %v", vgName, lvName, lv.Active, active)
+		return nil, errors.Errorf("logical volume %v/%v active state is %v, expected %v", vgName, lvName, lv.Active, active)
 	}
 	if lv.Size < minimumSize {
-		return nil, fmt.Errorf("logical volume %v/%v size is %v, expected at least %v bytes", vgName, lvName, lv.Size, minimumSize)
+		return nil, errors.Errorf("logical volume %v/%v size is %v, expected at least %v bytes", vgName, lvName, lv.Size, minimumSize)
 	}
 	if !requireDevice {
 		return lv, nil
@@ -496,7 +500,7 @@ func (ops Instance) confirmLV(vgName, lvName string, active bool, minimumSize in
 		return nil, err
 	}
 	if !deviceExists || !blockDevice {
-		return nil, fmt.Errorf("logical volume device %v is not an available block device", devicePath)
+		return nil, errors.Errorf("logical volume device %v is not an available block device", devicePath)
 	}
 	return lv, nil
 }
@@ -507,7 +511,7 @@ func (ops Instance) confirmLVAbsent(vgName, lvName string) error {
 		return err
 	}
 	if lv != nil {
-		return fmt.Errorf("logical volume %v/%v still exists after removal", vgName, lvName)
+		return errors.Errorf("logical volume %v/%v still exists after removal", vgName, lvName)
 	}
 	return nil
 }
@@ -528,14 +532,14 @@ func (ops Instance) inspectDevice(path string) (bool, bool, error) {
 	if _, err := os.Lstat(inspectPath); os.IsNotExist(err) {
 		return false, false, nil
 	} else if err != nil {
-		return false, false, fmt.Errorf("failed to inspect logical volume device path %v: %v", path, err)
+		return false, false, errors.Errorf("failed to inspect logical volume device path %v: %v", path, err)
 	}
 	info, err := os.Stat(inspectPath)
 	if os.IsNotExist(err) {
 		return true, false, nil
 	}
 	if err != nil {
-		return true, false, fmt.Errorf("failed to resolve logical volume device %v: %v", path, err)
+		return true, false, errors.Errorf("failed to resolve logical volume device %v: %v", path, err)
 	}
 	blockDevice := info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0
 	return true, blockDevice, nil
@@ -547,6 +551,9 @@ func (ops Instance) findLV(name string) (*LogicalVolume, error) {
 		return nil, err
 	}
 	for i := range lvs {
+		if lvs[i].IsThinPool() {
+			continue
+		}
 		if lvs[i].Name == name {
 			return &lvs[i], nil
 		}
@@ -562,6 +569,9 @@ func (ops Instance) findEngineAttachment(engineName string) (*LogicalVolume, err
 		return nil, err
 	}
 	for i := range lvs {
+		if lvs[i].IsThinPool() {
+			continue
+		}
 		if localLVEngineName(&lvs[i]) == engineName {
 			return &lvs[i], nil
 		}
@@ -573,7 +583,7 @@ func (ops Instance) findEngineAttachment(engineName string) (*LogicalVolume, err
 func (ops Instance) markEngineAttached(lv *LogicalVolume, engineName string) error {
 	if _, err := ops.executor.Execute(nil, "lvchange",
 		CommandArgs("--addtag", lvmEngineTagPrefix+engineName, lv.VGName+"/"+lv.Name), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return fmt.Errorf("failed to tag logical volume %v/%v for engine %v: %v", lv.VGName, lv.Name, engineName, err)
+		return errors.Errorf("failed to tag logical volume %v/%v for engine %v: %v", lv.VGName, lv.Name, engineName, err)
 	}
 	return nil
 }
@@ -582,7 +592,7 @@ func (ops Instance) markEngineAttached(lv *LogicalVolume, engineName string) err
 func (ops Instance) clearEngineAttachment(lv *LogicalVolume, engineName string) error {
 	if _, err := ops.executor.Execute(nil, "lvchange",
 		CommandArgs("--deltag", lvmEngineTagPrefix+engineName, lv.VGName+"/"+lv.Name), lhtypes.ExecuteDefaultTimeout); err != nil {
-		return fmt.Errorf("failed to untag logical volume %v/%v for engine %v: %v", lv.VGName, lv.Name, engineName, err)
+		return errors.Errorf("failed to untag logical volume %v/%v for engine %v: %v", lv.VGName, lv.Name, engineName, err)
 	}
 	return nil
 }

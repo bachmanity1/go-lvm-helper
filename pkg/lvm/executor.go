@@ -3,12 +3,13 @@ package lvm
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cockroachdb/errors"
 
 	lhtypes "github.com/longhorn/go-common-libs/types"
 )
@@ -59,11 +60,10 @@ func (e *Executor) execute(envs []string, binary string, args []string, stdinStr
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("timeout executing: %v %v", binary, args)
+		return "", errors.Errorf("timeout executing: %v %v", binary, args)
 	}
 	if err != nil {
-		return output.String(), fmt.Errorf("failed to execute: %v %v, output %s, stderr %s: %w",
-			binary, args, output.String(), stderr.String(), err)
+		return output.String(), errors.Wrapf(err, "failed to execute: %v %v, output %s, stderr %s", binary, args, output.String(), stderr.String())
 	}
 	return output.String(), nil
 }

@@ -8,11 +8,13 @@ import (
 	"sync"
 	"time"
 
-	lhexec "github.com/longhorn/go-common-libs/exec"
-	enginerpc "github.com/longhorn/types/pkg/generated/enginerpc"
+	"github.com/cockroachdb/errors"
 
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+
+	lhexec "github.com/longhorn/go-common-libs/exec"
+	enginerpc "github.com/longhorn/types/pkg/generated/enginerpc"
 )
 
 const (
@@ -66,7 +68,7 @@ func (ops EngineMetrics) Get(engineName string) (*enginerpc.Metrics, error) {
 	engineTag := lvmEngineTagPrefix + engineName
 	var devicePath string
 	for _, lv := range lvs {
-		if !lv.Active || lv.Path == "" {
+		if !lv.Active || lv.IsThinPool() || lv.Path == "" {
 			continue
 		}
 		for _, tag := range lv.Tags {
@@ -156,22 +158,22 @@ func readKernelBlockCounters(devicePath string) (blockCounters, error) {
 		return blockCounters{}, err
 	}
 	if !found {
-		return blockCounters{}, fmt.Errorf("block device %v does not exist", devicePath)
+		return blockCounters{}, errors.Errorf("block device %v does not exist", devicePath)
 	}
 	statPath := fmt.Sprintf("/sys/dev/block/%d:%d/stat", major, minor)
 	data, err := os.ReadFile(statPath)
 	if err != nil {
-		return blockCounters{}, fmt.Errorf("failed to read block statistics for %v: %w", devicePath, err)
+		return blockCounters{}, errors.Wrapf(err, "failed to read block statistics for %v", devicePath)
 	}
 	fields := strings.Fields(string(data))
 	if len(fields) < 8 {
-		return blockCounters{}, fmt.Errorf("unexpected block statistics for %v: %q", devicePath, strings.TrimSpace(string(data)))
+		return blockCounters{}, errors.Errorf("unexpected block statistics for %v: %q", devicePath, strings.TrimSpace(string(data)))
 	}
 	values := make([]uint64, 8)
 	for i := range values {
 		values[i], err = strconv.ParseUint(fields[i], 10, 64)
 		if err != nil {
-			return blockCounters{}, fmt.Errorf("failed to parse block statistics for %v: %w", devicePath, err)
+			return blockCounters{}, errors.Wrapf(err, "failed to parse block statistics for %v", devicePath)
 		}
 	}
 	return blockCounters{

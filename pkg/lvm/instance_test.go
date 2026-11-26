@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	rpc "github.com/longhorn/types/pkg/generated/imrpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	rpc "github.com/longhorn/types/pkg/generated/imrpc"
 )
 
 type fakeInstanceExecutor struct {

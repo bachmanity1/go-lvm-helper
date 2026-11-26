@@ -8,9 +8,10 @@ import (
 	"testing"
 	"time"
 
-	rpc "github.com/longhorn/types/pkg/generated/imrpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	rpc "github.com/longhorn/types/pkg/generated/imrpc"
 )
 
 func TestCreateDevicesFileIfMissing(t *testing.T) {
@@ -132,6 +133,7 @@ var testDevices = map[string][2]int64{
 	"/dev/disk/by-path/pci-0000:05:00.0": {8, 32},
 	"/dev/mapper/mpatha":                 {253, 3},
 	"/dev/dm-3":                          {253, 3},
+	"dev/sdb-relative":                   {8, 16},
 }
 
 func fakeDeviceNumbers(devPath string) (int64, int64, bool, error) {
@@ -224,6 +226,9 @@ func TestParseDiskPath(t *testing.T) {
 		{path: "/dev/sdb;data-vg", wantErr: true},
 		{path: "/dev/", wantErr: true},
 		{path: "/mnt/disk", wantErr: true},
+		{path: "dev/sdb-relative", wantErr: true},
+		{path: "/dev/bad*name", wantErr: true},
+		{path: "/dev/-dashed", wantErr: true},
 	} {
 		dp, err := ops.parseDiskPath(tc.path)
 		if tc.wantErr {

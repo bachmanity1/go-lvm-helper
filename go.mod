@@ -3,6 +3,7 @@ module github.com/longhorn/go-lvm-helper
 go 1.26.0
 
 require (
+	github.com/cockroachdb/errors v1.14.0
 	github.com/google/uuid v1.6.0
 	github.com/longhorn/go-common-libs v0.0.0-20261028232656-6805a1f65080
 	github.com/longhorn/types v0.0.0-20261030035820-c6ac902022cf
@@ -13,7 +14,6 @@ require (
 )
 
 require (
-	github.com/cockroachdb/errors v1.14.0 // indirect
 	github.com/cockroachdb/logtags v0.0.0-20230118201751-21c54148d20b // indirect
 	github.com/cockroachdb/redact v1.1.5 // indirect
 	github.com/getsentry/sentry-go v0.46.0 // indirect
