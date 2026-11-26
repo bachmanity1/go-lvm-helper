@@ -58,6 +58,9 @@ func TestCommandArgsDisableUdev(t *testing.T) {
 		`external_device_info_source = "none"`,
 		"udev_sync = 0",
 		"udev_rules = 0",
+		// Metadata locks must be the host's, or a host-side LVM command
+		// racing Longhorn's silently loses updates.
+		`locking_dir = "/host/run/lock/lvm"`,
 		"command-argument",
 	} {
 		if !strings.Contains(args, expected) {

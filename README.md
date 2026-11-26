@@ -12,8 +12,8 @@ file so Longhorn-managed devices stay isolated from the host's.
   [longhorn-instance-manager](https://github.com/longhorn/longhorn-instance-manager):
   - disk: create, adopt, refresh, grow and delete volume groups with a
     `longhorn-thin-pool` thin pool;
-  - instance: replica instances as thin LVs, engine instances as LVM tags;
-  - metrics: device I/O counters sampled from `/proc/diskstats`;
+  - instance: replica instances as thick or thin LVs, engine instances as LVM tags;
+  - metrics: device I/O counters sampled from `/sys/dev/block/<major>:<minor>/stat`;
   - executor: an LVM command runner that terminates the whole process group
     on timeout so a timed-out command cannot hold a volume-group lock.
 

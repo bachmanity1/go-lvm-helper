@@ -46,8 +46,12 @@ const (
 
 	// The local instance manager bind-mounts the host /dev into its mount
 	// namespace. Let LVM synchronously manage device nodes there instead of
-	// depending on host udev rules or udev cookie synchronization.
-	lvmNoUdevConfig = `devices { external_device_info_source = "none" } activation { udev_sync = 0 udev_rules = 0 }`
+	// depending on host udev rules or udev cookie synchronization. LVM
+	// serializes metadata updates per volume group through file locks in
+	// locking_dir, and the instance manager's own /run is invisible to the
+	// host, so the lock must live on the host's /run (mounted at /host) or
+	// a host-side LVM command racing Longhorn's silently loses updates.
+	lvmConfig = `devices { external_device_info_source = "none" } activation { udev_sync = 0 udev_rules = 0 } global { locking_dir = "/host/run/lock/lvm" }`
 )
 
 func IsProvisioningMode(mode string) bool {
@@ -130,10 +134,11 @@ func createDevicesFileIfMissing(path string) (bool, error) {
 	return created, nil
 }
 
-// CommandArgs limits an LVM command to Longhorn's persistent devices file and
-// makes its device-node management independent of udev.
+// CommandArgs limits an LVM command to Longhorn's persistent devices file,
+// makes its device-node management independent of udev, and takes the LVM
+// locks where the host takes them.
 func CommandArgs(args ...string) []string {
-	return append([]string{"--devicesfile", DevicesFileName, "--config", lvmNoUdevConfig}, args...)
+	return append([]string{"--devicesfile", DevicesFileName, "--config", lvmConfig}, args...)
 }
 
 func newVGName() string {
